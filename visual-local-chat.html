@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Visual Chat</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            padding: 20px;
+            background-color: #f0f0f0;
+            color: #333;
+            margin: 0;
+        }
+        .main-container {
+            display: flex;
+            gap: 20px;
+            width: 100%;
+            max-width: 1000px; /* Adjusted width */
+            align-items: flex-start;
+        }
+        .video-section {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            flex-basis: 480px; /* Set a base width */
+            flex-shrink: 0;
+        }
+        .chat-section {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            background-color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            flex-grow: 1;
+            height: calc(360px + 2px + 2px + 40px); /* Match video height + borders + input approx */
+            max-height: 550px; /* Ensure it doesn't get too tall on large screens */
+        }
+        #chatLog {
+            flex-grow: 1;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background-color: #f9f9f9;
+            border-radius: 4px;
+            min-height: 200px;
+        }
+        .chat-message {
+            padding: 8px 12px;
+            border-radius: 15px;
+            margin-bottom: 8px;
+            max-width: 85%; /* Slightly wider */
+            line-height: 1.4;
+            word-wrap: break-word; /* Ensure long words break */
+        }
+        .chat-message.user {
+            background-color: #007bff;
+            color: white;
+            margin-left: auto;
+            border-bottom-right-radius: 5px;
+        }
+        .chat-message.ai {
+            background-color: #e9ecef;
+            color: #333;
+            margin-right: auto;
+            border-bottom-left-radius: 5px;
+        }
+        .chat-input-area {
+            display: flex;
+            gap: 10px;
+        }
+        #chatInput {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #sendChatButton {
+            padding: 10px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            background-color: #28a745;
+            color: white;
+        }
+        #videoContainer {
+            position: relative;
+            width: 480px; /* Fixed width */
+            height: 360px; /* Fixed height */
+            border: 2px solid #333;
+            background-color: #000;
+            border-radius: 8px;
+        }
+        #videoFeed { display: block; width: 100%; height: 100%; border-radius: 6px; object-fit: cover; }
+        // Canvas is not strictly needed if not drawing overlays, but keep for potential future use
+        #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        label { font-weight: bold; margin-bottom: 5px; display: block;}
+        input[type="text"]#baseURL { /* Specific styling for baseURL if needed */
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>AI Visual Chat</h1>
+
+    <div class="main-container">
+        <div class="video-section">
+            <div id="videoContainer">
+                <video id="videoFeed" autoplay playsinline></video>
+                <canvas id="canvas"></canvas> </div>
+            <div>
+                <label for="baseURL">Base API:</label>
+                <input type="text" id="baseURL" name="BaseURL" value="http://localhost:8080">
+            </div>
+        </div>
+
+        <div class="chat-section">
+            <div id="chatLog"></div>
+            <div class="chat-input-area">
+                <input type="text" id="chatInput" placeholder="Ask a question about the video...">
+                <button id="sendChatButton">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('videoFeed');
+        const overlayCanvas = document.getElementById('canvas'); // Kept for future
+        // const overlayCtx = overlayCanvas.getContext('2d'); // Only if drawing
+
+        const baseURLInput = document.getElementById('baseURL');
+        const chatLog = document.getElementById('chatLog');
+        const chatInput = document.getElementById('chatInput');
+        const sendChatButton = document.getElementById('sendChatButton');
+
+        let stream;
+        let isChatting = false;
+        let chatHistory = []; // To store conversation history
+        const MAX_HISTORY_TURNS = 5; // Keep last 5 turns (1 turn = 1 user + 1 AI message)
+
+        function captureImage() {
+            if (!stream || !video.videoWidth || video.videoWidth === 0) {
+                console.warn("Video stream not ready or has no dimensions.");
+                return null;
+            }
+            const captureCanvas = document.createElement('canvas');
+            captureCanvas.width = video.videoWidth;
+            captureCanvas.height = video.videoHeight;
+            const context = captureCanvas.getContext('2d');
+            context.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+            return captureCanvas.toDataURL('image/jpeg', 0.8);
+        }
+
+        async function sendApiRequest(messagesPayload, currentButton = null) {
+            const originalButtonText = currentButton ? currentButton.textContent : null;
+            let originalButtonDisabledState = false;
+            if (currentButton) {
+                 originalButtonDisabledState = currentButton.disabled;
+                 currentButton.textContent = "AI is processing...";
+                 currentButton.disabled = true;
+            }
+
+            try {
+                const response = await fetch(`${baseURLInput.value}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        max_tokens: 350, // Allow for slightly longer responses with history
+                        messages: messagesPayload // This now includes history
+                    })
+                });
+                if (!response.ok) {
+                    const errorData = await response.text();
+                    return `Server error: ${response.status} - ${errorData}`;
+                }
+                const data = await response.json();
+                if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+                    return data.choices[0].message.content;
+                }
+                return "No response content found or unexpected format.";
+            } catch (error) {
+                console.error("API Request Error:", error);
+                return `Network or API error: ${error.message}`;
+            }
+            finally {
+                if (currentButton && originalButtonText) {
+                    currentButton.textContent = originalButtonText;
+                    currentButton.disabled = originalButtonDisabledState; // Restore original disabled state
+                }
+            }
+        }
+
+        function addMessageToChatLog(message, sender) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('chat-message', sender);
+            messageElement.textContent = message; // For now, just text. Consider HTML for richer content.
+            chatLog.appendChild(messageElement);
+            chatLog.scrollTop = chatLog.scrollHeight;
+        }
+
+        async function handleSendChatMessage() {
+            const userQuestion = chatInput.value.trim();
+            if (!userQuestion || isChatting) return;
+
+            if (!stream) {
+                addMessageToChatLog("Camera not available. Cannot send visual query.", "ai");
+                return;
+            }
+
+            isChatting = true;
+            sendChatButton.disabled = true; // Disable button during processing
+            addMessageToChatLog(userQuestion, "user");
+            chatInput.value = "";
+
+            // Add user's textual question to chat history
+            chatHistory.push({ role: "user", content: userQuestion });
+
+            // Manage history length (simple truncation of oldest turns)
+            // Each turn has a user and an AI message, so 2*MAX_HISTORY_TURNS
+            if (chatHistory.length > MAX_HISTORY_TURNS * 2) {
+                chatHistory = chatHistory.slice(chatHistory.length - MAX_HISTORY_TURNS * 2);
+            }
+
+            const imageBase64URL = captureImage();
+            if (!imageBase64URL) {
+                addMessageToChatLog("Failed to capture image. Please try again.", "ai");
+                // Remove the last user message from history as it was not fully processed
+                chatHistory.pop();
+                isChatting = false;
+                sendChatButton.disabled = false;
+                return;
+            }
+
+            // Construct messages for API: history + current question with image
+            const messagesForAPI = [
+                ...chatHistory.map(msg => ({ role: msg.role, content: msg.content })), // Send only text from history
+                { // Current user turn with new image and question
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: userQuestion },
+                        { type: 'image_url', image_url: { url: imageBase64URL } }
+                    ]
+                }
+            ];
+
+            const historyForAPI = chatHistory.slice(0, -1); // All history *except* the last user text we just added
+
+            const currentTurnPayload = {
+                role: 'user',
+                content: [
+                    { type: 'text', text: userQuestion },
+                    { type: 'image_url', image_url: { url: imageBase64URL } }
+                ]
+            };
+
+            const finalMessagesForAPI = [...historyForAPI, currentTurnPayload];
+
+            const aiResponse = await sendApiRequest(finalMessagesForAPI, sendChatButton);
+            addMessageToChatLog(aiResponse, "ai");
+
+            // Add AI's response to chat history
+            chatHistory.push({ role: "assistant", content: aiResponse });
+             // Re-manage history length after AI response
+            if (chatHistory.length > MAX_HISTORY_TURNS * 2) {
+                chatHistory = chatHistory.slice(chatHistory.length - MAX_HISTORY_TURNS * 2);
+            }
+
+
+            isChatting = false;
+            sendChatButton.disabled = false;
+            chatInput.focus();
+        }
+
+        sendChatButton.addEventListener('click', handleSendChatMessage);
+        chatInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter' && !event.shiftKey) { // Send on Enter, allow Shift+Enter for newline if textarea
+                event.preventDefault(); // Prevent default Enter behavior (like newline in input)
+                handleSendChatMessage();
+            }
+        });
+
+        async function initCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    if(video.videoWidth > 0 && overlayCanvas){ // Check if metadata loaded properly
+                        overlayCanvas.width = video.clientWidth;
+                        overlayCanvas.height = video.clientHeight;
+                    }
+                };
+                addMessageToChatLog("Hi there! I'm your visual assistant. Show me something and ask a question!", "ai");
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                addMessageToChatLog(`Error accessing camera: ${err.name}. Please ensure permissions are granted and reload.`, "ai");
+                alert(`Error accessing camera: ${err.name}. Ensure permissions are granted and on HTTPS or localhost.`);
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', initCamera);
+        window.addEventListener('beforeunload', () => {
+            if (stream) stream.getTracks().forEach(track => track.stop());
+        });
+    </script>
+</body>
+</html>
