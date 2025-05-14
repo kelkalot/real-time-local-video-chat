@@ -10,3 +10,4 @@ How to:
 3) Download visual-local-chat.html and open it
 4) Start chating :)
    
+![image](https://github.com/user-attachments/assets/be48a73e-54b4-4e94-a902-3c36db024242)
